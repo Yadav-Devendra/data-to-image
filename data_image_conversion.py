@@ -50,15 +50,27 @@ def read_key_iv(key_file, iv_file):
         raise
 
 def pad_data(data, block_size=16):
+    """
+    Pads the data to be a multiple of block_size.
+    
+    Args:
+        data (bytes): The data to pad.
+        block_size (int): The block size for padding (default is 16).
+    
+    Returns:
+        bytes: The padded data.
+    """
     padding_length = block_size - (len(data) % block_size)
     padding = bytes([padding_length] * padding_length)
     return data + padding
 
-def unpad_data(data, block_size=16):
+def unpad_data(data):
     padding_length = data[-1]
-    if padding_length < 1 or padding_length > block_size:
-        raise ValueError("Invalid padding bytes.")
-    return data[:-padding_length]
+    if padding_length > 16:
+        return data  # No padding
+    if all(byte == padding_length for byte in data[-padding_length:]):
+        return data[:-padding_length]
+    return data  # Invalid padding, return data as is
 
 def encrypt_data_in_chunks(input_file, key, iv, chunk_size=64*1024):
     encrypted_data = bytearray()
@@ -69,28 +81,28 @@ def encrypt_data_in_chunks(input_file, key, iv, chunk_size=64*1024):
         with open(input_file, 'rb') as file:
             while chunk := file.read(chunk_size):
                 padded_chunk = pad_data(chunk)
-                encrypted_chunk = encryptor.update(padded_chunk) + encryptor.finalize()
+                encrypted_chunk = encryptor.update(padded_chunk)
                 encrypted_data.extend(encrypted_chunk)
-                encryptor = cipher.encryptor()  # Reset encryptor for next chunk
 
+        encrypted_data.extend(encryptor.finalize())
         logging.info(f"Data encrypted. Total length: {len(encrypted_data)} bytes.")
         return encrypted_data
     except Exception as e:
         logging.error(f"Error during encryption: {e}")
         raise
 
-def decrypt_data_in_chunks(encrypted_file, key, iv, chunk_size=64*1024):
+def decrypt_data_in_chunks(encrypted_data, key, iv, chunk_size=64*1024):
     decrypted_data = bytearray()
     try:
         cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=default_backend())
         decryptor = cipher.decryptor()
 
-        with open(encrypted_file, 'rb') as file:
-            while chunk := file.read(chunk_size):
-                decrypted_chunk = decryptor.update(chunk)
-                decrypted_data.extend(decrypted_chunk)
+        for i in range(0, len(encrypted_data), chunk_size):
+            chunk = encrypted_data[i:i+chunk_size]
+            decrypted_chunk = decryptor.update(chunk)
+            decrypted_data.extend(decrypted_chunk)
 
-        decrypted_data += decryptor.finalize()  # Ensure finalization of decryption
+        decrypted_data.extend(decryptor.finalize())
         decrypted_data = unpad_data(decrypted_data)
         logging.info(f"Data decrypted. Total length: {len(decrypted_data)} bytes.")
         return decrypted_data
@@ -129,16 +141,12 @@ def image_to_data(image_path, key, iv):
             for pixel in pixels:
                 binary_data.extend(pixel)
 
-            # Remove potential padding bytes (zero bytes) and check length
+            # Remove potential padding bytes (zero bytes)
             binary_data = binary_data.rstrip(b'\x00')
             logging.info(f"Extracted binary data length after stripping zeros: {len(binary_data)}")
 
-            # Verify that the length is a multiple of the block size (16 bytes)
-            if len(binary_data) % 16 != 0:
-                raise ValueError(f"Extracted binary data length is not a multiple of the block size (16 bytes). Length: {len(binary_data)}")
-
             # Decrypt the data
-            decrypted_data = decrypt_data_in_chunks(encrypted_file=image_path, key=key, iv=iv)
+            decrypted_data = decrypt_data_in_chunks(binary_data, key, iv)
             return decrypted_data
     except UnidentifiedImageError as e:
         logging.error(f"Unable to identify image file {image_path}: {e}")
