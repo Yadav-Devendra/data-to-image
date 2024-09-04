@@ -7,14 +7,13 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
 # Configure logging
-logging.basicConfig(filename='data_image_conversion.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Global variables to store encrypted data and its original length
-encrypted_data = bytearray() 
-original_data_len = 0
+log_dir = 'logs'
+os.makedirs(log_dir, exist_ok=True)
+log_file_path = os.path.join(log_dir, 'data_image_conversion.log')
+logging.basicConfig(filename=log_file_path, level=logging.DEBUG,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 def load_config(config_file='config.ini'):
-    """Load configuration from a file."""
     config = configparser.ConfigParser()
     config.read(config_file)
     if 'settings' not in config:
@@ -22,7 +21,6 @@ def load_config(config_file='config.ini'):
     return config['settings']
 
 def validate_config(config):
-    """Validate configuration settings."""
     required_fields = ['input_file', 'output_image', 'key_file', 'iv_file', 'width']
     for field in required_fields:
         if field not in config:
@@ -31,7 +29,6 @@ def validate_config(config):
         raise ValueError("Width must be a positive integer.")
 
 def read_key_iv(key_file, iv_file):
-    """Read key and IV from files."""
     try:
         with open(key_file, 'rb') as kf:
             key = kf.read()
@@ -45,200 +42,176 @@ def read_key_iv(key_file, iv_file):
 
         logging.info(f"Key length: {len(key)} bytes")
         logging.info(f"IV length: {len(iv)} bytes")
+        logging.debug(f"Key (hex): {key.hex()}")
+        logging.debug(f"IV (hex): {iv.hex()}")
         return key, iv
     except Exception as e:
         logging.error(f"Error reading key or IV: {e}")
         raise
 
 def pad_data(data, block_size=16):
-    """Pads data using PKCS#7 padding to the specified block size."""
     padding_length = block_size - (len(data) % block_size)
     padding = bytes([padding_length] * padding_length)
-    padded_data = data + padding
-    return padded_data
+    return data + padding
 
 def unpad_data(data, block_size=16):
-    """Removes PKCS#7 padding from data."""
     padding_length = data[-1]
     if padding_length < 1 or padding_length > block_size:
         raise ValueError("Invalid padding bytes.")
     return data[:-padding_length]
 
-def encrypt_data(data, key, iv):
-    """Encrypt the data using AES encryption."""
+def encrypt_data_in_chunks(input_file, key, iv, chunk_size=64*1024):
+    encrypted_data = bytearray()
     try:
         cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=default_backend())
         encryptor = cipher.encryptor()
 
-        # Pad the data
-        padded_data = pad_data(data, block_size=16)  
+        with open(input_file, 'rb') as file:
+            while chunk := file.read(chunk_size):
+                padded_chunk = pad_data(chunk)
+                encrypted_chunk = encryptor.update(padded_chunk) + encryptor.finalize()
+                encrypted_data.extend(encrypted_chunk)
+                encryptor = cipher.encryptor()  # Reset encryptor for next chunk
 
-        encrypted_data = encryptor.update(padded_data) + encryptor.finalize()
-
-        logging.info(f"Data length before padding: {len(data)}")
-        logging.info(f"Data length after padding: {len(padded_data)}")
-        logging.info(f"Data encrypted. Length: {len(encrypted_data)}")
-        logging.debug(f"Encrypted data (hex): {encrypted_data.hex()}")  # Log hex output
+        logging.info(f"Data encrypted. Total length: {len(encrypted_data)} bytes.")
         return encrypted_data
     except Exception as e:
         logging.error(f"Error during encryption: {e}")
         raise
 
-def data_to_image(data, output_image, width):
-    """Convert encrypted data to an image."""
-    global encrypted_data  # Declare encrypted_data as global
-    global original_data_len # Declare original_data_len as global
-
-    try:
-        encrypted_data = data  # Store the data in the global variable
-        original_data_len = len(encrypted_data)  # Store the original length before padding
-
-        # Calculate padding length
-        padding_length = 16 - (len(encrypted_data) % 16) if len(encrypted_data) % 16 != 0 else 0
-        # Explicitly add padding bytes as pixel values
-        encrypted_data += bytes([padding_length] * padding_length)
-
-        # Calculate image height
-        img_height = (len(encrypted_data) + width * 3 - 1) // (width * 3)
-
-        # Create the image
-        image = Image.new('RGB', (width, img_height), color='white')
-        pixel_data = []
-        for i in range(0, len(encrypted_data), 3):
-            if i + 2 < len(encrypted_data):
-                pixel_data.append((encrypted_data[i], encrypted_data[i + 1], encrypted_data[i + 2]))
-            else:
-                # Handle padding at the end 
-                remaining_bytes = len(encrypted_data) - i
-                if remaining_bytes == 1:
-                    pixel_data.append((encrypted_data[i], 0, 0))
-                elif remaining_bytes == 2:
-                    pixel_data.append((encrypted_data[i], encrypted_data[i+1], 0))
-
-        image.putdata(pixel_data)
-        image.save(output_image, format='BMP')
-        logging.info(f"Image saved to {output_image}")
-    except Exception as e:
-        logging.error(f"Error during image creation: {e}")
-        raise
-
-def decrypt_data(encrypted_data, key, iv):
-    """Decrypt the encrypted data using AES decryption."""
+def decrypt_data_in_chunks(encrypted_file, key, iv, chunk_size=64*1024):
+    decrypted_data = bytearray()
     try:
         cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=default_backend())
         decryptor = cipher.decryptor()
-        decrypted_padded_data = decryptor.update(encrypted_data) + decryptor.finalize()
 
-        # Unpad the data
-        decrypted_data = unpad_data(decrypted_padded_data, block_size=16)
+        with open(encrypted_file, 'rb') as file:
+            while chunk := file.read(chunk_size):
+                decrypted_chunk = decryptor.update(chunk)
+                decrypted_data.extend(decrypted_chunk)
 
-        logging.info(f"Decrypted padded data length: {len(decrypted_padded_data)}")
-        logging.info(f"Data decrypted. Length: {len(decrypted_data)}")
+        decrypted_data += decryptor.finalize()  # Ensure finalization of decryption
+        decrypted_data = unpad_data(decrypted_data)
+        logging.info(f"Data decrypted. Total length: {len(decrypted_data)} bytes.")
         return decrypted_data
-    except ValueError as e:
-        logging.error(f"Padding error during decryption: {e}. Decrypted padded data: {decrypted_padded_data}")
-        raise
     except Exception as e:
         logging.error(f"Error during decryption: {e}")
         raise
 
-def image_to_data(image_path, key, iv):
-    """Convert an image back to data."""
-    global encrypted_data  # Access the global encrypted_data
-    global original_data_len # Access the global original_data_len
-
+def data_to_image(encrypted_data, output_image, width):
     try:
-        if not os.path.isfile(image_path):
-            raise FileNotFoundError(f"Image file {image_path} does not exist.")
+        img_height = (len(encrypted_data) + width * 3 - 1) // (width * 3)
+        image = Image.new('RGB', (width, img_height), color='white')
 
-        logging.info(f"Attempting to open image file: {image_path}")
+        pixel_data = []
+        for i in range(0, len(encrypted_data), 3):
+            pixel = encrypted_data[i:i+3]
+            if len(pixel) < 3:
+                pixel += bytes(3 - len(pixel))  # Add padding to fit the RGB format
+            pixel_data.append(tuple(pixel))
+
+        image.putdata(pixel_data)
+        image.save(output_image, format='BMP')
+        logging.info(f"Image saved to {output_image} with size ({width}, {img_height})")
+        logging.info(f"Image can hold up to {width * img_height * 3} bytes.")
+    except Exception as e:
+        logging.error(f"Error during image creation: {e}")
+        raise
+
+def image_to_data(image_path, key, iv):
+    try:
         with Image.open(image_path) as image:
             if image.format != 'BMP':
-                raise ValueError(f"Image file {image_path} is not a BMP image.")
+                raise ValueError(f"Image file {image_path} is not in BMP format. Current format: {image.format}")
 
             pixels = list(image.getdata())
-
-            # Extract bytes, stopping at the original data length
             binary_data = bytearray()
-            byte_count = 0
             for pixel in pixels:
-                for component in pixel:
-                    if byte_count < original_data_len:  # Only extract up to the original length
-                        binary_data.append(component)
-                        byte_count += 1
-                    else:
-                        break
+                binary_data.extend(pixel)
 
-            # Remove padding (now that we've extracted the correct amount of data)
-            padding_length = binary_data[-1] 
-            if 1 <= padding_length <= 16:
-                binary_data = binary_data[:-padding_length]
-            else:
-                logging.warning("Invalid padding value found. Possible data corruption.")
+            # Remove potential padding bytes (zero bytes) and check length
+            binary_data = binary_data.rstrip(b'\x00')
+            logging.info(f"Extracted binary data length after stripping zeros: {len(binary_data)}")
 
-            logging.info(f"Extracted binary data length: {len(binary_data)}")
-            logging.debug(f"Extracted binary data (hex): {binary_data.hex()}") 
-            decrypted_data = decrypt_data(binary_data, key, iv)
+            # Verify that the length is a multiple of the block size (16 bytes)
+            if len(binary_data) % 16 != 0:
+                raise ValueError(f"Extracted binary data length is not a multiple of the block size (16 bytes). Length: {len(binary_data)}")
+
+            # Decrypt the data
+            decrypted_data = decrypt_data_in_chunks(encrypted_file=image_path, key=key, iv=iv)
             return decrypted_data
-
     except UnidentifiedImageError as e:
-        logging.error(f"Cannot identify image file {image_path}: {e}")
-        raise
-    except FileNotFoundError as e:
-        logging.error(f"File not found: {e}")
+        logging.error(f"Unable to identify image file {image_path}: {e}")
         raise
     except ValueError as e:
-        logging.error(f"Invalid image format: {e}")
+        logging.error(f"Value error during image to data conversion: {e}")
         raise
     except Exception as e:
-        logging.error(f"Error during image to data conversion: {e}")
+        logging.error(f"Unexpected error during image to data conversion: {e}")
         raise
 
-def main():
-    """Main function to handle command-line arguments and process the data."""
-    global encrypted_data # Declare encrypted_data as global
+def validate_file_path(path, mode='r'):
+    """ Check if the file exists and is accessible. """
+    if mode == 'r':
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Input file {path} does not exist or is not a file.")
+    elif mode == 'w':
+        # For output files, just check if the directory is writable
+        directory = os.path.dirname(path)
+        if directory and not os.access(directory, os.W_OK):
+            raise PermissionError(f"Cannot write to the directory {directory}.")
+    else:
+        raise ValueError(f"Invalid mode {mode}. Expected 'r' or 'w'.")
 
+def main():
     parser = argparse.ArgumentParser(description='Encrypt and decrypt data using images.')
     parser.add_argument('action', choices=['encrypt', 'decrypt'], help='Action to perform: encrypt or decrypt')
     parser.add_argument('--input', required=True, help='Input file (data for encryption or image for decryption)')
     parser.add_argument('--output', required=True, help='Output file (image for encryption or data file for decryption)')
     args = parser.parse_args()
 
-    config = load_config()
-    validate_config(config)
-
-    key_file = config.get('key_file')
-    iv_file = config.get('iv_file')
-    width = int(config.get('width'))
-
     try:
-        key, iv = read_key_iv(key_file, iv_file)  # Ensure correct key and IV are read
+        # Validate action
+        if args.action not in ['encrypt', 'decrypt']:
+            raise ValueError(f"Invalid action: {args.action}. Must be 'encrypt' or 'decrypt'.")
+
+        # Load and validate configuration
+        config = load_config()
+        validate_config(config)
+
+        # Validate input and output file paths
+        if args.action == 'encrypt':
+            validate_file_path(args.input, mode='r')
+            validate_file_path(args.output, mode='w')
+        elif args.action == 'decrypt':
+            validate_file_path(args.input, mode='r')
+            validate_file_path(args.output, mode='w')
+
+        key_file = config.get('key_file')
+        iv_file = config.get('iv_file')
+        width = int(config.get('width'))
+
+        key, iv = read_key_iv(key_file, iv_file)
 
         if args.action == 'encrypt':
-            if not os.path.isfile(args.input):
-                raise FileNotFoundError(f"Input file {args.input} not found")
-
-            with open(args.input, 'rb') as file:
-                input_data = file.read()
-
-            logging.info(f"Data length before encryption: {len(input_data)}")
-            encrypted_data = encrypt_data(input_data, key, iv)
+            encrypted_data = encrypt_data_in_chunks(args.input, key, iv)
             data_to_image(encrypted_data, args.output, width)
             logging.info(f"Data encrypted and image saved as {args.output}")
 
         elif args.action == 'decrypt':
-            if not os.path.isfile(args.input):
-                raise FileNotFoundError(f"Input file {args.input} not found")
-
-            logging.info(f"Attempting to open image file: {args.input}")
             recovered_data = image_to_data(args.input, key, iv)
-            with open(args.output, 'wb') as file:
-                file.write(recovered_data)
-            logging.info(f"Image decrypted and data saved as {args.output}")
 
+            if recovered_data is not None:
+                with open(args.output, 'wb') as file:
+                    file.write(recovered_data)
+                logging.info(f"Image decrypted and data saved as {args.output}")
+            else:
+                logging.error("Decryption failed. No data recovered from the image.")
+
+    except (ValueError, FileNotFoundError, PermissionError) as e:
+        logging.error(f"Validation error: {e}")
     except Exception as e:
-        logging.error(f"Error in main process: {e}")
-        raise
+        logging.error(f"Unexpected error: {e}")
 
 if __name__ == "__main__":
     main()
