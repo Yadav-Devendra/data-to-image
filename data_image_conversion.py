@@ -1,6 +1,7 @@
-import os
+import argparse
 import logging
 import configparser
+import os
 from PIL import Image
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
@@ -13,6 +14,8 @@ def load_config(config_file='config.ini'):
     """Load configuration from a file."""
     config = configparser.ConfigParser()
     config.read(config_file)
+    if 'settings' not in config:
+        raise ValueError("Config file is missing 'settings' section.")
     return config['settings']
 
 def validate_config(config):
@@ -75,48 +78,61 @@ def image_to_data(image_path, key, iv):
         logging.error(f"Error during image to data conversion: {e}")
         raise
 
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description="Encrypt data and save as image, or decrypt image to recover data.")
+    parser.add_argument('action', choices=['encrypt', 'decrypt'], help="Action to perform")
+    parser.add_argument('--input', required=True, help="Input file (data for encryption or image for decryption)")
+    parser.add_argument('--output', required=True, help="Output file (image for encryption or recovered data for decryption)")
+    return parser.parse_args()
+
 def main():
+    args = parse_args()
     config = load_config()
     validate_config(config)
-    
-    input_file = config.get('input_file')
-    output_image = config.get('output_image')
-    key_file = config.get('key_file')
-    iv_file = config.get('iv_file')
     width = int(config.get('width'))
-    
+
     try:
-        # Generate or load key and IV
-        if not os.path.isfile(key_file) or not os.path.isfile(iv_file):
-            key = os.urandom(32)  # AES-256 key
-            iv = os.urandom(16)   # AES block size IV
-            with open(key_file, 'wb') as kf:
-                kf.write(key)
-            with open(iv_file, 'wb') as ivf:
-                ivf.write(iv)
-            logging.info(f"Generated new key and IV.")
-        else:
-            with open(key_file, 'rb') as kf:
+        if args.action == 'encrypt':
+            if not os.path.isfile(config.get('key_file')) or not os.path.isfile(config.get('iv_file')):
+                key = os.urandom(32)
+                iv = os.urandom(16)
+                with open(config.get('key_file'), 'wb') as kf:
+                    kf.write(key)
+                with open(config.get('iv_file'), 'wb') as ivf:
+                    ivf.write(iv)
+                logging.info(f"Generated new key and IV.")
+            else:
+                with open(config.get('key_file'), 'rb') as kf:
+                    key = kf.read()
+                with open(config.get('iv_file'), 'rb') as ivf:
+                    iv = ivf.read()
+                logging.info(f"Loaded existing key and IV.")
+
+            if not os.path.isfile(args.input):
+                raise FileNotFoundError(f"Input file {args.input} not found")
+            
+            with open(args.input, 'rb') as file:
+                input_data = file.read()
+            
+            encrypted_data = encrypt_data(input_data, key, iv)
+            data_to_image(encrypted_data, args.output, width)
+            logging.info(f"Data encrypted and image saved as {args.output}")
+        
+        elif args.action == 'decrypt':
+            with open(config.get('key_file'), 'rb') as kf:
                 key = kf.read()
-            with open(iv_file, 'rb') as ivf:
+            with open(config.get('iv_file'), 'rb') as ivf:
                 iv = ivf.read()
-            logging.info(f"Loaded existing key and IV.")
-        
-        if not os.path.isfile(input_file):
-            raise FileNotFoundError(f"Input file {input_file} not found")
-        
-        with open(input_file, 'rb') as file:
-            input_data = file.read()
-        
-        encrypted_data = encrypt_data(input_data, key, iv)
-        data_to_image(encrypted_data, output_image, width)
-        
-        logging.info(f"Data encrypted and image saved as {output_image}")
-    
+            
+            recovered_data = image_to_data(args.input, key, iv)
+            with open(args.output, 'wb') as file:
+                file.write(recovered_data)
+            logging.info(f"Image decrypted and data saved as {args.output}")
+
     except Exception as e:
         logging.error(f"Error in main process: {e}")
         raise
 
 if __name__ == "__main__":
     main()
-
